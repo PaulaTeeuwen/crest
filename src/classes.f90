@@ -31,6 +31,7 @@ module crest_data
   use lwoniom_module,only:lwoniom_input
   use molbuilder_construct_list !> from molbuilder dir
   use ttconf_settings_mod,only:ttconf_settings !> TTConf-light settings
+  use nci_metal_settings_mod,only:nci_metal_settings !> nci_metal runtype settings
   use term_ui,only:progress_state
   implicit none
 
@@ -95,6 +96,7 @@ module crest_data
   integer,parameter,public :: crest_dryrun     = 276
   integer,parameter,public :: crest_ensemblehess = 277
   integer,parameter,public :: crest_ttc        = 278
+  integer,parameter,public :: crest_nci_metal  = 279
 !>> <<!
   integer,parameter,public :: crest_test       = 456
 
@@ -552,6 +554,8 @@ module crest_data
     character(len=:),allocatable :: rigidconf_userfile
     !>--- TTConf-light settings
     type(ttconf_settings) :: ttconf
+    !>--- nci_metal runtype settings
+    type(nci_metal_settings) :: nci_metal
     !>--- refinement queue
     integer,allocatable :: refine_queue(:)
     !>--- lwONIOM input
@@ -1323,6 +1327,7 @@ contains  !> MODULE PROCEDURES START HERE
     self%rigidconf_toposource = src%rigidconf_toposource
     if (allocated(src%rigidconf_userfile)) self%rigidconf_userfile = src%rigidconf_userfile
     self%ttconf = src%ttconf  !> ttconf_settings: allocatables only, intrinsic = is deep
+    self%nci_metal = src%nci_metal  !> nci_metal_settings: allocatables only, intrinsic = is deep
     if (allocated(src%refine_queue))       self%refine_queue       = src%refine_queue
     if (allocated(src%ONIOM_toml))         self%ONIOM_toml         = src%ONIOM_toml
 

@@ -292,6 +292,9 @@ program CREST
     case (crest_test)
       call crest_playground(env,tim)
 
+    case (crest_nci_metal)
+      call crest_search_newnci_metal(env,tim)
+
     case (crest_none)
       call crest_no_runtype_selected()
 

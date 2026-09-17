@@ -1727,7 +1727,7 @@ contains  !> MODULE PROCEDURES START HERE
             end if
           end if
         else
-          atlist(i1) = .true.
+          if (i1 >= 1.and.i1 <= nat) atlist(i1) = .true.
         end if
       else
         btmp = atmp(:l-1)

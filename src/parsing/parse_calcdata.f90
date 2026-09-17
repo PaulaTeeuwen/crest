@@ -132,6 +132,12 @@ contains !> MODULE PROCEDURES START HERE
         call parse_scandat(blk,calc,istat)
         included = .true.
 
+      else if (blk%header == 'calculation.nci_metal') then
+        !>-- NOTE: does not set included=.true.: this is metadata for the
+        !>   nci_metal runtype (which UFF4MOF atom type to use on which
+        !>   metal atom), not a calculator/level definition on its own.
+        call parse_nci_metal_atomdata(env,blk,istat)
+
       end if
     end do
     if (included) then
@@ -1243,6 +1249,229 @@ contains !> MODULE PROCEDURES START HERE
 
     return
   end subroutine parse_scan_auto
+
+!========================================================================================!
+
+  subroutine parse_nci_metal_atomdata(env,blk,istat)
+!*******************************************************
+!* Parse one [[calculation.nci_metal]] entry: which
+!* UFF4MOF atom type (see uff4mof.f90) to use on which
+!* metal atom(s), e.g.
+!*    [[calculation.nci_metal]]
+!*    atom = 1
+!*    uff4mof = "Fe6+2"
+!*    restrain = true   # optional, default true -- see below
+!*    auto = true       # alternative to uff4mof -- see below
+!*    force = true      # optional, only meaningful with uff4mof -- see below
+!*    angle_fc = 0.05   # optional, Hartree/rad^2 -- see below
+!*    r1 = 2.10         # optional, Angstrom -- see below
+!*    theta0 = 95.0      # optional, degrees -- see below
+!* "atom" may be a single index, a list (atom = [1,7]), or a
+!* string understood by strucrd's get_atlist -- a range
+!* ("335-338"), or an element symbol ("Zn", meaning "every
+!* Zn atom"). The spec is only stored as text here and
+!* resolved to concrete atom IDs later, once the structure
+!* is available (see crest_search_newnci_metal) -- env%ref
+!* is not necessarily loaded yet at this point in parsing.
+!* "restrain" (default true) controls whether the resolved
+!* coordination sphere gets a distance restraint during MTD/
+!* optimization (see nci_metal_bonds in search_newnci_metal.f90);
+!* set false to type an atom for reporting/auto-detection only.
+!* One of "uff4mof" (manual), "auto" (resolve a CN-tie, e.g.
+!* Cu4+2 vs Cu3f2, by comparing actual donor angles against each
+!* candidate's theta0), or an explicit "restrain = ..." (true or
+!* false) must be given for the entry to do anything -- see
+!* search_newnci_metal.f90. A genuinely CN-ambiguous metal (e.g.
+!* Cu at CN4, tied between Cu4+2/Cu3f2/Cu3+1) behaves as follows:
+!*   - NO [[calculation.nci_metal]] entry at all for that atom:
+!*     proceeds unrestrained, no halt -- nothing was ever asked for.
+!*   - "restrain = false" (alone, or with anything else): explicit
+!*     opt-out, proceeds unrestrained, no halt.
+!*   - "restrain = true" alone (no label, no auto), or "auto = true"
+!*     that fails to find enough donors to break the tie: explicit
+!*     intent to restrain that could not be honored -- the WHOLE RUN
+!*     HALTS before any MTD, rather than silently spending compute
+!*     on an arbitrary/undetermined coordination geometry.
+!*   - "uff4mof = ..." or a successful "auto = true": resolves and
+!*     restrains normally.
+!* By default, "uff4mof" must name a label tabulated for the SAME
+!* element as the atom it is applied to (e.g. "Zn6+2" on a Zn atom) --
+!* a label from a different element's namespace (e.g. "Pt4+2" on a Cu
+!* atom) is rejected with a warning and treated as if no label was
+!* given. Set "force = true" alongside "uff4mof" to deliberately
+!* override this and borrow another element's tabulated bond radius
+!* (r1) and ideal angle (theta0) anyway -- e.g. to target a metal
+!* whose own UFF4MOF entries are poor/missing using a better-behaved
+!* analog's parameters. A loud warning is always printed when this is
+!* used, and "force" has no effect without an accompanying "uff4mof".
+!* "angle_fc" overrides the angle restraint's harmonic force constant
+!* (Hartree/rad^2; default, when not set, is constraints.f90's own
+!* fcdefault=0.01). That default is strong enough to HOLD a geometry
+!* already close to its target angle, but far too weak to actively
+!* RELOCATE a structure to a substantially different target -- e.g.
+!* forcing genuinely tetrahedral (109.47 deg) starting from an
+!* already-square-planar (90 deg) geometry stays stuck at ~90 deg even
+!* with a 30x longer MTD, confirmed empirically. Set angle_fc well
+!* above 0.01 (e.g. 0.05-0.2) to actually force a large geometry change.
+!* "r1" (Angstrom) and/or "theta0" (degrees) fully bypass the UFF4MOF
+!* table lookup for that specific quantity, replacing it with a raw
+!* user-supplied value -- for a metal/oxidation-state/geometry that
+!* isn't tabulated in UFF4MOF at all, or a deliberately non-standard
+!* (distorted/asymmetric real) target that doesn't match any tabulated
+!* entry. Each is independent: "r1" alone overrides only the
+!* metal-ligand bond-radius estimate used for the distance restraint
+!* and donor-detection window (the angle restraint still uses whatever
+!* theta0 normal resolution -- label/auto/force -- would have given);
+!* "theta0" alone overrides only the angle restraint's target angle;
+!* both together fully replace the table for this atom, and no
+!* uff4mof= label is needed in that case (either alone is also enough
+!* to satisfy the "one of uff4mof/auto/restrain=..." requirement above,
+!* and either also resolves a genuinely CN-ambiguous metal without
+!* needing auto=true or an explicit label, since the ambiguity was
+!* about which TABLE entry to use and these bypass the table). UNLIKE
+!* force=true (which still borrows a real, internally-consistent
+!* tabulated entry), r1/theta0 are NOT chemically validated by CREST at
+!* all -- the user is fully responsible for physical sanity. See
+!* search_newnci_metal.f90.
+!* CAVEAT for theta0 on a 4-donor center: the angle restraint applies
+!* ONE uniform target to all 6 pairwise donor-metal-donor angles
+!* unless that target is within 1 deg of 90 (which instead triggers a
+!* cis/trans SPLIT -- see search_newnci_metal.f90). For exactly 4
+!* donors, a uniform target is only geometrically achievable at
+!* 109.47 deg (the regular tetrahedron) -- confirmed empirically that
+!* an "in-between" value like 95 deg cannot be reached (the restrained
+!* structure stays within ~0.5 deg of 109.47 regardless of angle_fc),
+!* since no 4-donor arrangement can satisfy all 6 pairs at a
+!* non-tetrahedral, non-90-deg value simultaneously. A genuinely
+!* distorted 4-coordinate target needs a non-uniform, per-pair
+!* assignment that does not currently exist outside the 90-deg
+!* cis/trans case -- until it does, set theta0 to an actually
+!* achievable uniform value (109.47 for tetrahedral, ~120 for
+!* trigonal-planar CN3, which is NOT similarly constrained), not an
+!* arbitrary compromise angle.
+!*******************************************************
+    implicit none
+    type(systemdata) :: env
+    type(datablock),intent(in) :: blk
+    integer,intent(inout) :: istat
+    character(len=64) :: spec
+    character(len=20) :: numstr
+    character(len=:),allocatable :: label
+    logical :: got_atom,got_label,got_restrain,got_r1,got_theta0
+    logical :: restrainval,autoval,forceval
+    real(wp) :: anglefcval,r1val,theta0val
+    integer :: i,k
+    if (blk%header .ne. 'calculation.nci_metal') return
+    got_atom = .false.
+    got_label = .false.
+    got_restrain = .false.
+    got_r1 = .false.
+    got_theta0 = .false.
+    restrainval = .true.
+    autoval = .false.
+    forceval = .false.
+    anglefcval = -1.0_wp !> <=0 signals "not set, use constraints.f90's own default (fcdefault)"
+    r1val = -1.0_wp    !> <=0 signals "not set, use normal UFF4MOF resolution"
+    theta0val = -1.0_wp !> <=0 signals "not set, use normal UFF4MOF resolution"
+    label = ''
+    spec = ''
+    do i = 1,blk%nkv
+      select case (blk%kv_list(i)%key)
+      case ('atom','atoms','id')
+        select case (blk%kv_list(i)%id)
+        case (valuetypes%int,valuetypes%string)
+!>--- rawvalue is bracket-free for both a plain integer ("5") and a
+!>    string ("Zn", "335-338", ...), so it can be used as-is
+          spec = trim(adjustl(blk%kv_list(i)%rawvalue))
+          got_atom = .true.
+        case (valuetypes%int_array)
+!>--- rawvalue for an array is bracketed ("[1,7]"), which get_atlist
+!>    does not understand -- rebuild a plain comma-separated spec
+          spec = ''
+          do k = 1,blk%kv_list(i)%na
+            write (numstr,'(i0)') blk%kv_list(i)%value_ia(k)
+            if (k == 1) then
+              spec = trim(numstr)
+            else
+              spec = trim(spec)//','//trim(numstr)
+            end if
+          end do
+          got_atom = .true.
+        case default
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end select
+      case ('uff4mof','uff','type','label')
+        if (blk%kv_list(i)%id == valuetypes%string) then
+          label = blk%kv_list(i)%value_c
+          got_label = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('restrain','constrain','hold')
+        if (blk%kv_list(i)%id == valuetypes%bool) then
+          restrainval = blk%kv_list(i)%value_b
+          got_restrain = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('auto')
+        if (blk%kv_list(i)%id == valuetypes%bool) then
+          autoval = blk%kv_list(i)%value_b
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('force')
+        if (blk%kv_list(i)%id == valuetypes%bool) then
+          forceval = blk%kv_list(i)%value_b
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('angle_fc')
+        if (blk%kv_list(i)%id == valuetypes%float.or.blk%kv_list(i)%id == valuetypes%int) then
+          anglefcval = blk%kv_list(i)%value_f
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('r1')
+        if (blk%kv_list(i)%id == valuetypes%float.or.blk%kv_list(i)%id == valuetypes%int) then
+          r1val = blk%kv_list(i)%value_f
+          got_r1 = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('theta0')
+        if (blk%kv_list(i)%id == valuetypes%float.or.blk%kv_list(i)%id == valuetypes%int) then
+          theta0val = blk%kv_list(i)%value_f
+          got_theta0 = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case default
+        istat = istat+1
+        write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+      end select
+    end do
+    if (got_atom.and.(got_label.or.autoval.or.got_restrain.or.got_r1.or.got_theta0)) then
+      if (got_label.and.autoval) then
+        write (stdout,'(1x,a)') &
+        & '**WARNING** [[calculation.nci_metal]] entry has both "uff4mof" and "auto=true"; '// &
+        & 'using the explicit "uff4mof" label'
+      end if
+      call env%nci_metal%add_spec(spec,label,restrainval,autoval,forceval,anglefcval,r1val,theta0val)
+    else
+      write (stdout,'(1x,a)') &
+      & '**WARNING** [[calculation.nci_metal]] entry needs "atom" and one of "uff4mof", "auto=true", '// &
+      & '"r1"/"theta0", or an explicit "restrain=..."; ignored'
+    end if
+  end subroutine parse_nci_metal_atomdata
 
 !========================================================================================!
 

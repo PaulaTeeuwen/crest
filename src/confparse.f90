@@ -349,6 +349,12 @@ subroutine parseflags(env,arg,nra)
   if (idum .ne. 0) then
     call parseinputfile(env,trim(arg(idum)))
     processedarg(idum) = .true.
+!>--- also consume a preceding --input/-i flag, if present
+    if (idum > 1) then
+      if (trim(arg(idum-1)) == '--input'.or.trim(arg(idum-1)) == '-i') then
+        processedarg(idum-1) = .true.
+      end if
+    end if
   end if
 
 !>--- first arg loop
@@ -967,6 +973,12 @@ subroutine parseflags(env,arg,nra)
         processedarg(i) = .true.
         env%preopt = .false.
         env%crestver = crest_test
+        exit
+
+      case ('-nci_metal')
+        processedarg(i) = .true.
+        env%crestver = crest_nci_metal
+        write (stdout,'(2x,a,t15,a)') argument//':','NCI sampling for metal-containing systems (WIP)'
         exit
       case default
         continue

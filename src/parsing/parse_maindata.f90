@@ -251,6 +251,9 @@ contains   !> MODULE PROCEDURES START HERE
         env%crestver = crest_ttc
         env%runver = crest_ttc
 
+      case ('nci_metal')
+        env%crestver = crest_nci_metal
+
       case ('protonate')
         env%properties = p_protonate
         env%crestver = crest_protonate

@@ -282,6 +282,25 @@ logical function isTMetal(i)
 end function isTMetal
 
 !====================================================!
+!> Alkali/alkaline-earth ("s-block ionic") metals --
+!> Li,Na,K,Rb,Cs,Fr and Be,Mg,Ca,Sr,Ba,Ra. These form
+!> real, UFF4MOF-tabulated coordination environments
+!> (e.g. octahedral Mg2+/Ca2+) but are not transition
+!> metals, so isTMetal above deliberately excludes them.
+!> Kept as a separate predicate rather than widening
+!> isTMetal itself, since other callers of isTMetal may
+!> rely on its narrower, literal meaning.
+!====================================================!
+logical function isSBlockMetal(i)
+  implicit none
+  integer :: i
+  isSBlockMetal = .false.
+  if (any(i == [3,11,19,37,55,87])) isSBlockMetal = .true. !> Li,Na,K,Rb,Cs,Fr
+  if (any(i == [4,12,20,38,56,88])) isSBlockMetal = .true. !> Be,Mg,Ca,Sr,Ba,Ra
+  return
+end function isSBlockMetal
+
+!====================================================!
 !> Write a constraint file with all bonds except X-H
 !====================================================!
 subroutine writeHeavyconstr(nat,at,bmat,force)
