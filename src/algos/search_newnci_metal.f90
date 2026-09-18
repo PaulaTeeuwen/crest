@@ -352,11 +352,23 @@ subroutine crest_search_newnci_metal(env,tim)
           else
             write (stdout,'(a,a,a)',advance='no') &
             & ', **WARNING** user override "',trim(uffchoice),'" is not a tabulated UFF4MOF label at all; ignored'
+            call print_uff_typo_hint(elem,uffopts,nuffopts)
             effective = autolabel
           end if
         else
-          write (stdout,'(a,a,a)',advance='no') &
-          & ', **WARNING** user override "',trim(uffchoice),'" is not tabulated for this element; ignored'
+!>--- label belongs to a DIFFERENT element's UFF4MOF namespace and
+!>    force=true was NOT given -- this is the accidental-typo/wrong-
+!>    element-guess case the halt-before-MTD safety net (see below)
+!>    does not otherwise catch, since a label WAS given (so this atom
+!>    never counts as "undecided"). Reject it loudly rather than
+!>    silently falling back to auto-detection, and point at both
+!>    escape routes: force=true (if the cross-element borrow was
+!>    actually intentional) and the list of labels genuinely tabulated
+!>    for THIS element (if it was a typo/mistaken guess).
+          write (stdout,'(a,a,a,a,a)',advance='no') &
+          & ', **WARNING** user override "',trim(uffchoice),'" is not a tabulated UFF4MOF type for ', &
+          & trim(elem),'; ignored (set force=true to deliberately borrow it from another element anyway)'
+          call print_uff_typo_hint(elem,uffopts,nuffopts)
           effective = autolabel
         end if
       else
@@ -824,6 +836,30 @@ contains
       end do
     end do
   end function angle_fit_score
+!========================================================================================!
+!> Prints, on the current output line (advance='no' style, matching the
+!> per-atom "UFF4MOF assignment" printout this is called from), the list
+!> of UFF4MOF labels actually tabulated for ELEM -- shown right next to
+!> a rejected cross-element/typo'd uff4mof= override so the user sees
+!> immediately what they probably meant to type, without having to
+!> scroll back up to the earlier "Available UFF4MOF atom types" block.
+!========================================================================================!
+  subroutine print_uff_typo_hint(elem,opts,nopts)
+    implicit none
+    character(len=*),intent(in) :: elem
+    character(len=8),intent(in) :: opts(:)
+    integer,intent(in) :: nopts
+    integer :: kk
+    if (nopts > 0) then
+      write (stdout,'(a,a,a)',advance='no') '. Types tabulated for ',trim(elem),': '
+      do kk = 1,nopts
+        if (kk > 1) write (stdout,'(a)',advance='no') '/'
+        write (stdout,'(a)',advance='no') trim(opts(kk))
+      end do
+    else
+      write (stdout,'(a,a,a)',advance='no') '. No UFF4MOF types are tabulated for ',trim(elem),' at all'
+    end if
+  end subroutine print_uff_typo_hint
 !========================================================================================!
 end subroutine crest_search_newnci_metal
 !========================================================================================!
