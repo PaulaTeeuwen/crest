@@ -60,6 +60,12 @@ module nci_metal_settings_mod
 
   public :: nci_metal_settings
 
+  !> one block's pi_atoms list (ragged storage: each block may give a
+  !> different number of ring/diene carbons, or none at all)
+  type :: pi_atomlist
+    integer,allocatable :: idx(:)
+  end type pi_atomlist
+
   type :: nci_metal_settings
     integer :: nassign = 0
     character(len=64),allocatable :: spec(:) !> raw atom spec, e.g. "1", "1-4", "Zn"
@@ -111,6 +117,56 @@ module nci_metal_settings_mod
     !> sanity. See search_newnci_metal.f90.
     real(wp),allocatable :: r1(:)
     real(wp),allocatable :: theta0(:)
+    !> if true, enumerate every symmetry-distinct way this metal's own
+    !> ligands could be arranged (isomer_generate_mod::generate_isomer_
+    !> structures) and run the FULL existing Kpush/alpha bias-potential
+    !> grid on every one of them (not a divided/split grid -- total job
+    !> count = grid_size * n_isomers), in addition to the input's own
+    !> arrangement, via crest_search_multimd2 instead of the single-
+    !> structure crest_search_multimd. Defaults to .true.: the point of
+    !> typing a metal at all is usually also to not miss an isomer a
+    !> single unconstrained start never crosses to (see e.g. ZnComplex-
+    !> seeded/ in final_tests, a fac start that never finds mer on its
+    !> own). Set to .false. per-spec for a single plain run, no isomer
+    !> enumeration -- see search_newnci_metal.f90.
+    !>
+    !> GFN-FF caveat: each seed (the input's own arrangement and every
+    !> generated isomer) gets its OWN independently (re-)initialized
+    !> force-field topology, warmed up from the trusted original input
+    !> geometry rather than isomer_generate's clash-avoiding expanded
+    !> one -- the physically correct setup for the MTD sampling itself
+    !> (confirmed directly: GFN-FF's one-time-per-structure topology
+    !> perception can genuinely differ between geometrically distinct
+    !> seeds sharing the same molecular graph, e.g. two separate cis/
+    !> trans-isomer runs landed 75+ kcal/mol apart despite normal,
+    !> non-dissociated geometries). The unavoidable cost: raw GFN-FF
+    !> energies are NOT guaranteed comparable across seeds in the
+    !> resulting ensemble -- valid for conformer generation (GFN-FF is
+    !> routinely used this way) but not for cross-seed energy ranking.
+    !> For energies you can trust, add a second [[calculation.level]]
+    !> with a topology-independent method (e.g. gfn2, the common choice) and
+    !> refine="sp" to re-score the whole final ensemble on one shared
+    !> scale -- see search_newnci_metal.f90 and final_tests/
+    !> BailarTwist-CoEn3/native_seeded_refined/.
+    logical,allocatable :: seed(:)
+    !> pi-coordination (eta-bonded) support: an explicit, user-given list
+    !> of atom indices forming a coordinating ring/diene face (donor
+    !> detection never finds these on its own -- it is hardcoded to the
+    !> usual Lewis-basic heteroatoms, N/O/S/P/F/Cl/Br/I, and explicitly
+    !> excludes carbon, see search_newnci_metal.f90). When given, a
+    !> centroidrange constraint (constraints.f90) is added between this
+    !> spec's resolved metal atom(s) and the LIVE centroid of pi_atoms(k)
+    !> %idx, giving eta-bonded ligands (COD, Cp, arenes, ...) the same
+    !> "survive the MTD bias potential" dissociation protection normal
+    !> donors get -- distance-only for now, no angle restraint. Unlike
+    !> every other field here, this one is intentionally NOT resolved
+    !> through the atom-indexed "last spec wins" mechanism (see
+    !> crest_search_newnci_metal): a metal with more than one separate
+    !> pi-ligand (e.g. nickelocene's two independent Cp rings) needs TWO
+    !> separate [[calculation.nci_metal]] blocks, same atom=, each its
+    !> own distinct pi_atoms -- each becomes its own constraint, not
+    !> merged into one wrong combined centroid.
+    type(pi_atomlist),allocatable :: pi_atoms(:)
   contains
     procedure :: add_spec => nci_metal_settings_add_spec
   end type nci_metal_settings
@@ -125,7 +181,7 @@ contains
 !> two specs overlap, resolution order (see crest_search_newnci_metal)
 !> decides which one applies to a given atom.
 !========================================================================================!
-  subroutine nci_metal_settings_add_spec(self,spec,label,restrain,auto,force,angle_fc,r1,theta0)
+  subroutine nci_metal_settings_add_spec(self,spec,label,restrain,auto,force,angle_fc,r1,theta0,seed,pi_atoms_in)
     class(nci_metal_settings),intent(inout) :: self
     character(len=*),intent(in) :: spec
     character(len=*),intent(in) :: label
@@ -135,11 +191,15 @@ contains
     real(wp),intent(in),optional :: angle_fc
     real(wp),intent(in),optional :: r1
     real(wp),intent(in),optional :: theta0
+    logical,intent(in),optional :: seed
+    integer,intent(in),optional :: pi_atoms_in(:)
     character(len=64),allocatable :: newspec(:)
     character(len=8),allocatable :: newuff(:)
-    logical,allocatable :: newrestrain(:),newauto(:),newforce(:)
+    logical,allocatable :: newrestrain(:),newauto(:),newforce(:),newseed(:)
     real(wp),allocatable :: newanglefc(:),newr1(:),newtheta0(:)
-    logical :: restrainval,autoval,forceval
+    type(pi_atomlist),allocatable :: newpiatoms(:)
+    integer :: ii
+    logical :: restrainval,autoval,forceval,seedval
     real(wp) :: anglefcval,r1val,theta0val
 
     restrainval = .true.
@@ -154,6 +214,12 @@ contains
     if (present(r1)) r1val = r1
     theta0val = -1.0_wp !> <=0 signals "not set, use normal UFF4MOF resolution"
     if (present(theta0)) theta0val = theta0
+!>--- unlike restrain above, seed defaults to false in every case (even
+!>    inside an explicit [[calculation.nci_metal]] block) -- it's the
+!>    isomer-generation + enantiomer-duplicate-filter machinery, an
+!>    opt-in feature, not a side effect of merely configuring a metal.
+    seedval = .false.
+    if (present(seed)) seedval = seed
 
     allocate (newspec(self%nassign+1))
     allocate (newuff(self%nassign+1))
@@ -163,6 +229,8 @@ contains
     allocate (newanglefc(self%nassign+1))
     allocate (newr1(self%nassign+1))
     allocate (newtheta0(self%nassign+1))
+    allocate (newseed(self%nassign+1))
+    allocate (newpiatoms(self%nassign+1))
     if (self%nassign > 0) then
       newspec(1:self%nassign) = self%spec(1:self%nassign)
       newuff(1:self%nassign) = self%uff(1:self%nassign)
@@ -172,6 +240,12 @@ contains
       newanglefc(1:self%nassign) = self%angle_fc(1:self%nassign)
       newr1(1:self%nassign) = self%r1(1:self%nassign)
       newtheta0(1:self%nassign) = self%theta0(1:self%nassign)
+      newseed(1:self%nassign) = self%seed(1:self%nassign)
+      if (allocated(self%pi_atoms)) then
+        do ii = 1,self%nassign
+          if (allocated(self%pi_atoms(ii)%idx)) newpiatoms(ii)%idx = self%pi_atoms(ii)%idx
+        end do
+      end if
     end if
     newspec(self%nassign+1) = adjustl(spec)
     newuff(self%nassign+1) = adjustl(label)
@@ -181,6 +255,8 @@ contains
     newanglefc(self%nassign+1) = anglefcval
     newr1(self%nassign+1) = r1val
     newtheta0(self%nassign+1) = theta0val
+    newseed(self%nassign+1) = seedval
+    if (present(pi_atoms_in)) newpiatoms(self%nassign+1)%idx = pi_atoms_in
     call move_alloc(newspec,self%spec)
     call move_alloc(newuff,self%uff)
     call move_alloc(newanglefc,self%angle_fc)
@@ -189,6 +265,8 @@ contains
     call move_alloc(newforce,self%force)
     call move_alloc(newrestrain,self%restrain)
     call move_alloc(newauto,self%auto)
+    call move_alloc(newseed,self%seed)
+    call move_alloc(newpiatoms,self%pi_atoms)
     self%nassign = self%nassign+1
   end subroutine nci_metal_settings_add_spec
 

@@ -23,8 +23,27 @@ module uff4mof_data
 !* table of lammps_interface (P. Boyd):
 !* https://github.com/peteboyd/lammps_interface/blob/master/lammps_interface/uff4mof.py
 !*
-!* Columns per atom type, as in the original table:
-!*   r1, theta0, x1, D1, zeta, Z1, Vi, Uj, Xi, hard, radius
+!* Columns per atom type, as in the original UFF/UFF4MOF table:
+!*   r1     - valence bond radius (Angstrom), the single-bond covalent
+!*            radius used to build UFF bond-stretch parameters
+!*   theta0 - ideal valence (bond) angle at this atom type (degrees),
+!*            e.g. 109.47 for tetrahedral, 120 for trigonal, 90/180 for
+!*            square-planar/octahedral or linear centers
+!*   x1     - van der Waals distance (Angstrom), the characteristic
+!*            length in the UFF Lennard-Jones-like nonbonded potential
+!*   D1     - van der Waals well depth (kcal/mol) for the nonbonded
+!*            potential
+!*   zeta   - van der Waals scaling exponent (dimensionless) used in
+!*            the UFF nonbonded potential
+!*   Z1     - effective charge (dimensionless), used to compute the
+!*            bond-stretch force constant and in bond-order corrections
+!*   Vi     - torsional barrier parameter (kcal/mol) for sp3 centers
+!*   Uj     - torsional barrier parameter (kcal/mol) for sp2 centers
+!*            (relevant e.g. for group 6 elements like O, S)
+!*   Xi     - GMP electronegativity (eV), used in charge-equilibration
+!*            (QEq) charge assignment
+!*   hard   - GMP idempotential/hardness (eV), also used in QEq
+!*   radius - GMP covalent radius (Angstrom) used in QEq
 !*
 !* This module only tabulates the parameters and provides a lookup
 !* of which atom types exist for a given element (e.g. "Fe" ->
@@ -46,11 +65,21 @@ module uff4mof_data
   public :: uff4mof_candidates_at_cn
 
   type :: uff4mof_entry
-    character(len=8) :: label
-    real(wp) :: r1,theta0,x1,D1,zeta,Z1,Vi,Uj,Xi,hard,radius
+    character(len=8) :: label   !> UFF4MOF atom-type label, e.g. "Fe6+2"
+    real(wp) :: r1     !> valence bond radius (Angstrom)
+    real(wp) :: theta0 !> ideal valence angle (degrees)
+    real(wp) :: x1     !> van der Waals distance (Angstrom)
+    real(wp) :: D1     !> van der Waals well depth (kcal/mol)
+    real(wp) :: zeta   !> van der Waals scaling exponent (dimensionless)
+    real(wp) :: Z1     !> effective charge, for bond force constant/bond order
+    real(wp) :: Vi     !> sp3 torsional barrier parameter (kcal/mol)
+    real(wp) :: Uj     !> sp2 torsional barrier parameter (kcal/mol)
+    real(wp) :: Xi     !> GMP electronegativity (eV), for QEq charges
+    real(wp) :: hard   !> GMP idempotential/hardness (eV), for QEq charges
+    real(wp) :: radius !> GMP covalent radius (Angstrom), for QEq charges
   end type uff4mof_entry
 
-  integer,parameter :: uff4mof_ntypes = 222
+  integer,parameter :: uff4mof_ntypes = 223
 
 !&<
   type(uff4mof_entry),parameter :: uff4mof_table(uff4mof_ntypes) = [ &
@@ -197,6 +226,26 @@ module uff4mof_data
     uff4mof_entry('Mn4+2   ',1.26_wp,90.0_wp,2.961_wp,0.013_wp,12.0_wp,2.43_wp,0_wp,0.7_wp,3.325_wp,4.105_wp,1.533_wp),&
     uff4mof_entry('Fe6+3   ',1.32_wp,90.0_wp,2.912_wp,0.013_wp,12.0_wp,2.43_wp,0_wp,0.7_wp,3.76_wp,4.14_wp,1.393_wp),&
     uff4mof_entry('Fe4+2   ',1.10_wp,90.0_wp,2.912_wp,0.013_wp,12.0_wp,2.43_wp,0_wp,0.7_wp,3.76_wp,4.14_wp,1.393_wp),&
+!>--- Fe5+3: genuine CN=5 trigonal-bipyramidal, added for the TBP 3rd
+!>    angle-class gap (gaps.html/fecl3.html) -- confirmed absent before
+!>    this: the ENTIRE UFF4MOF table (every element) had no CN=5 entry
+!>    at all (literature UFF4MOF was built for MOF nodes, which are
+!>    almost always 4- or 6-coordinate). theta0=120.0 here is the
+!>    equatorial-equatorial angle (used as the "primary" value, same
+!>    convention as every other entry); 90 (axial-equatorial) and 180
+!>    (axial-axial) are geometric constants for TBP, not metal-
+!>    dependent, so they are NOT stored here -- see the ndonors==5 TBP
+!>    branch in search_newnci_metal.f90, which hardcodes them exactly
+!>    like regime (1) already hardcodes 180 for square-planar/
+!>    octahedral instead of storing it per-entry. r1 and the trailing
+!>    element-level fields (x1/D1/zeta/Z1/Vi/Uj/Xi/hard/radius) are
+!>    IDENTICAL across every existing Fe entry regardless of CN/entry
+!>    (confirmed: Fe3+2/Fe4+2/Fe6+2/Fe6+3 share the exact same values
+!>    for all nine) -- reused unchanged here. r1=1.27 is a reasonable
+!>    interpolated estimate (between Fe4+2's 1.10 and Fe6+2/3's
+!>    1.32-1.335, matching Fe3+2's own 1.27), not a literature-derived
+!>    value -- requested as angles-only; see that discussion.
+    uff4mof_entry('Fe5+3   ',1.27_wp,120.0_wp,2.912_wp,0.013_wp,12.0_wp,2.43_wp,0_wp,0.7_wp,3.76_wp,4.14_wp,1.393_wp),&
     uff4mof_entry('Co3+2   ',1.24_wp,109.47_wp,2.872_wp,0.014_wp,12.0_wp,1.308_wp,0_wp,0.7_wp,4.105_wp,4.175_wp,1.406_wp),&
     uff4mof_entry('Co4+2   ',1.16_wp,90.0_wp,2.872_wp,0.014_wp,12.0_wp,1.308_wp,0_wp,0.7_wp,4.105_wp,4.175_wp,1.406_wp),&
     uff4mof_entry('Cu4+2   ',1.28_wp,90.0_wp,3.495_wp,0.005_wp,12.0_wp,2.43_wp,0_wp,0.7_wp,4.2_wp,4.22_wp,1.434_wp),&

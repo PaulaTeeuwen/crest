@@ -979,6 +979,59 @@ subroutine parseflags(env,arg,nra)
         processedarg(i) = .true.
         env%crestver = crest_nci_metal
         write (stdout,'(2x,a,t15,a)') argument//':','NCI sampling for metal-containing systems (WIP)'
+!>--- mostly the same bundle as plain "-nci" (ellipsoid wall potential,
+!>    the reduced 6-MTD bias grid, cheap size-only MD length heuristic, no
+!>    autozsort) -- a metal complex is at least as prone to the MTD bias
+!>    tearing off a weakly-bound ligand as a generic NCI cluster is to
+!>    fragmenting, so it needs the same safety net at a minimum (see the
+!>    UFF4MOF-informed coordination-sphere restraints added separately in
+!>    crest_search_newnci_metal for the complementary per-bond/per-angle
+!>    protection).
+!>--- UNLIKE plain "-nci": performCross (GC) is deliberately left at its
+!>    normal default (on), not forced off. Plain "-nci" disables GC
+!>    because recombining fragments of a loose, multi-molecule
+!>    non-covalent cluster isn't chemically meaningful -- but nci_metal
+!>    is a single coordination complex, where GC recombining pieces of
+!>    ITS OWN conformers (e.g. a partial ligand-rearrangement found in
+!>    one MTD replicate combined with a different partial rearrangement
+!>    found in another) is exactly the mechanism that can reach a
+!>    distant-but-bond-network-preserving isomer (fac/mer, a Bailar-twist
+!>    enantiomer, a Berry-pseudorotation arrangement, ...) that no single
+!>    MTD trajectory managed alone. Revisit rotamermds (also currently
+!>    left at its normal on default here, i.e. never explicitly touched)
+!>    and the runver=4 bias-grid strength once real fac/mer, Bailar-twist,
+!>    and Berry-pseudorotation test cases (final_tests/) show whether
+!>    they should differ from plain NCI mode too.
+        env%NCI = .true.
+        env%runver = 4
+        env%autozsort = .false.
+!>--- CREGEN's topology check (checktopo, the "topo=" toml keyword) is
+!>    independent of its fragmentation check (checkbroken, "fusion or
+!>    dissociation" -- see cregen.f90:471/180): checkbroken stays on
+!>    regardless of this setting, so disabling checktopo here does NOT
+!>    remove the safety net against an actual ligand dissociating -- it
+!>    only disables the STRICTER comparison against the starting
+!>    reference's own neighbor list, which is a poor fit for metal
+!>    coordination specifically: a legitimate coordination-number change
+!>    (cluster/ in final_tests/, Mg2+ gaining a donor it didn't start
+!>    with) or a large-angle isomerization (fac/mer, a Bailar/Berry
+!>    rearrangement) can cross crest's distance-based bonding threshold
+!>    without anything chemically wrong happening, and this check cannot
+!>    tell that apart from a real problem -- confirmed to misfire this
+!>    way on several final_tests/ cases (mer-Co(NO2)3(NH3)3,
+!>    tetraplatin/unrestrained_gfn2, cluster/), each previously needing
+!>    an explicit topo=false in its own toml to get a real result instead
+!>    of CREGEN's degenerate energy=0.0 fallback. A user's own explicit
+!>    topo=true/false in their toml still overrides this default, since
+!>    toml parsing happens after this CLI dispatch.
+        env%checktopo = .false.
+!>--- see parse_maindata.f90's "nci_metal" case (the dispatch point
+!>    actually used by `runtype = "nci_metal"` in a toml) for the full
+!>    rationale: forces CREGEN to never allow a false-enantiomer/mirror
+!>    match, since has_stereo doesn't recognize metal-centered chirality
+!>    (confirmed: Delta/Lambda Co(en)3 gives RMSD~8e-8 under the "auto"
+!>    default, vs the correct ~0.93 with this setting).
+        env%iinversion = 2
         exit
       case default
         continue

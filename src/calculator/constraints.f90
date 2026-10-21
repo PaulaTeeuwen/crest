@@ -50,12 +50,14 @@ module constraints
   integer,parameter :: box = 6
   integer,parameter :: box_fermi = 7
   integer,parameter :: bondrange = 8
+  integer,parameter :: centroidrange = 9
 
   integer,public,parameter :: na_gapdiff = -1
   integer,public,parameter :: na_gapdiff2 = -2
 
   integer,parameter :: pharmonic = 1
-  integer,parameter :: plogfermi = 2
+  integer,parameter :: pflatharm = 2  !> flat-bottom harmonic: zero force within
+                                       !> +/-fc(2) of the reference, harmonic beyond it
 
   !=====================================================!
 
@@ -96,6 +98,7 @@ module constraints
     procedure :: analyzedummy => analyze_dummy_bond_constraint
     procedure :: rdbondconstraint => analyze_dummy_bond_constraint2
     procedure :: bondrangeconstraint => create_bondrange_constraint
+    procedure :: centroidrangeconstraint => create_centroidrange_constraint
     procedure :: addfreeze => constraint_freezeassoc
     procedure :: complete => complete_defaults
   end type constraint
@@ -306,6 +309,8 @@ contains  !>--- Module routines start here
 
     case (bondrange)
       call bondrange_constraint(n,xyz,constr,energy,grd)
+    case (centroidrange)
+      call centroidrange_constraint(n,xyz,constr,energy,grd)
     case default
       return
     end select
@@ -370,6 +375,11 @@ contains  !>--- Module routines start here
     case (bondrange)
       art = 'bondrange'
       write (atoms,'(1x,"atoms:",1x,i0,",",i0)') self%atms(1:2)
+      write (chnl,headfmt) trim(art),trim(atoms)
+      write (chnl,'(2x,"upper=",f8.2,1x,"lower=",f8.2)') self%ref(1)*autoaa,self%ref(2)*autoaa
+    case (centroidrange)
+      art = 'centroidrange'
+      write (atoms,'(1x,"atom:",1x,i0,1x,"-> centroid of",1x,i0,1x,"atoms")') self%atms(1),self%n-1
       write (chnl,headfmt) trim(art),trim(atoms)
       write (chnl,'(2x,"upper=",f8.2,1x,"lower=",f8.2)') self%ref(1)*autoaa,self%ref(2)*autoaa
     case default
@@ -580,7 +590,6 @@ contains  !>--- Module routines start here
     integer :: iat,jat
     real(wp) :: a,b,c,x
     real(wp) :: dist,ref,k,dum
-    real(wp) :: T,beta
 
     energy = 0.0_wp
     grd = 0.0_wp
@@ -597,14 +606,8 @@ contains  !>--- Module routines start here
     k = constr%fc(1)
 
     x = dist-ref
-    select case (constr%subtype)
-    case (pharmonic)
-      energy = 0.5_wp*k*(x)**2
-      dum = k*x
-    case (plogfermi)
-      energy = kb*T*log(1.0_wp+exp(beta*x))
-      dum = (kb*T*beta*exp(beta*x))/(exp(beta*x)+1.0_wp)
-    end select
+    energy = 0.5_wp*k*(x)**2
+    dum = k*x
 
     grd(1,iat) = dum*(a/dist)
     grd(2,iat) = dum*(b/dist)
@@ -730,6 +733,143 @@ contains  !>--- Module routines start here
     return
   end subroutine bondrange_constraint
 
+!========================================================================================!
+!> subroutine create_centroidrange_constraint
+!> restrain the distance between a single atom (typically a metal) and
+!> the LIVE centroid of a set of other atoms (typically a pi-coordinating
+!> ring/diene's carbons) -- same two-sided logfermi potential as
+!> bondrangeconstraint, just measured to a running average of positions
+!> instead of a second fixed atom. This gives pi-coordinated ligands
+!> (eta-bonded dienes, Cp rings, arenes -- anything bonding through
+!> carbon, which the normal donor-detection path never sees, see
+!> search_newnci_metal.f90) the same "don't drift apart during MTD"
+!> protection normal N/O/S/P/halide donors already get, without needing
+!> a real dummy atom in the topology (gfnff/tblite are external
+!> libraries -- there is no supported way to hand them a non-interacting
+!> ghost particle). The centroid is recomputed every call directly from
+!> the current xyz of the listed ring atoms, so it moves correctly with
+!> them; the resulting gradient is chain-ruled back: the metal gets the
+!> full raw gradient, each ring atom gets -1/N of it (d(centroid)/d(atom
+!> position) = 1/N for every atom in the centroid's own defining set),
+!> which exactly conserves total force/torque like any proper restraint.
+  subroutine create_centroidrange_constraint(self,imetal,iring,dup,dlow,beta,T)
+    implicit none
+    class(constraint) :: self
+    integer,intent(in) :: imetal
+    integer,intent(in) :: iring(:)
+    real(wp),intent(in) :: dup,dlow
+    real(wp),optional :: beta
+    real(wp),optional :: T
+    integer :: nr
+
+    nr = size(iring)
+    call self%deallocate()
+    self%type = centroidrange
+    self%n = 1+nr
+    allocate (self%atms(1+nr))
+    allocate (self%fc(2),source=fcdefault)
+    allocate (self%ref(2))
+    self%atms(1) = imetal
+    self%atms(2:1+nr) = iring(1:nr)
+    self%ref(1) = max(dup,dlow)
+    self%ref(2) = min(dup,dlow)
+    if (present(T)) then
+      self%fc(1) = T/kb
+    else
+      self%fc(1) = 0.1_wp/kb
+    end if
+    self%fc(1) = abs(self%fc(1))
+    if (present(beta)) then
+      self%fc(2) = beta
+    else
+      self%fc(2) = betadefault
+    end if
+    return
+  end subroutine create_centroidrange_constraint
+
+  subroutine centroidrange_constraint(n,xyz,constr,energy,grd)
+!************************************************************
+!* constrain the distance between atom A and the centroid of
+!* a set of other atoms B1..BN via two logfermi potentials,
+!* same functional form as bondrange_constraint. r and k are
+!* in atomic units (Bohr, Hartree).
+!************************************************************
+    implicit none
+    integer,intent(in) :: n
+    real(wp),intent(in) :: xyz(3,n)
+    type(constraint) :: constr
+
+    real(wp),intent(out) :: energy
+    real(wp),intent(out) :: grd(3,n)
+    integer :: iat,nr,kk,jat
+    real(wp) :: a,b,c,x
+    real(wp) :: dist,ref,k,dum
+    real(wp) :: ref_upper,ref_lower
+    real(wp) :: T,beta
+    real(wp) :: dr(3)
+    real(wp) :: centroid(3)
+
+    energy = 0.0_wp
+    grd = 0.0_wp
+
+    if (constr%n < 2) return
+
+    iat = constr%atms(1)
+    nr = constr%n-1
+
+    centroid = 0.0_wp
+    do kk = 1,nr
+      jat = constr%atms(1+kk)
+      centroid(:) = centroid(:)+xyz(:,jat)
+    end do
+    centroid = centroid/real(nr,wp)
+
+    a = xyz(1,iat)-centroid(1)
+    b = xyz(2,iat)-centroid(2)
+    c = xyz(3,iat)-centroid(3)
+    dist = sqrt(a**2+b**2+c**2)
+    ref_upper = constr%ref(1)
+    ref_lower = constr%ref(2)
+    T = constr%fc(1)
+    beta = constr%fc(2)
+
+    !> upper bound contribution
+    x = dist-ref_upper
+    energy = logfermi(T,beta,x)
+    dum = dlogfermi(T,beta,x)
+    dr(1) = dum*(a/dist)
+    dr(2) = dum*(b/dist)
+    dr(3) = dum*(c/dist)
+    grd(:,iat) = grd(:,iat)+dr(:)
+    do kk = 1,nr
+      jat = constr%atms(1+kk)
+      grd(:,jat) = grd(:,jat)-dr(:)/real(nr,wp)
+    end do
+
+    !> lower bound contribution
+    x = ref_lower-dist
+    energy = energy+logfermi(T,beta,x)
+    dum = dlogfermi(T,beta,x)
+    dr(1) = -dum*(a/dist)
+    dr(2) = -dum*(b/dist)
+    dr(3) = -dum*(c/dist)
+    grd(:,iat) = grd(:,iat)+dr(:)
+    do kk = 1,nr
+      jat = constr%atms(1+kk)
+      grd(:,jat) = grd(:,jat)-dr(:)/real(nr,wp)
+    end do
+
+    !> energy shift (no gradient contribution), same as bondrange_constraint
+    ref = (ref_upper+ref_lower)/2.0_wp
+    x = ref-ref_upper
+    dum = logfermi(T,beta,x)
+    x = ref_lower-ref
+    dum = dum+logfermi(T,beta,x)
+    energy = energy-dum
+
+    return
+  end subroutine centroidrange_constraint
+
   function logfermi(T,beta,x) result(energy)
     implicit none
     real(wp) :: energy
@@ -750,18 +890,22 @@ contains  !>--- Module routines start here
 
 !========================================================================================!
 !> subroutien create_angle_constraint
-  subroutine create_angle_constraint(self,a,b,c,d,k)
+  subroutine create_angle_constraint(self,a,b,c,d,k,tol)
     implicit none
     class(constraint) :: self
     integer,intent(in) :: a,b,c
     real(wp),intent(in) :: d ! constrain angle in degrees
     real(wp),optional :: k
+    real(wp),optional :: tol !> flat-bottom half-width in degrees; if present and
+                              !> >0, switches this restraint to a flat-bottom
+                              !> harmonic (zero force within +/-tol of the
+                              !> target, harmonic beyond) instead of a plain
+                              !> harmonic pinned exactly at the target
     real(wp) :: dum,d2
     call self%deallocate()
     self%type = angle
     self%n = 3
     allocate (self%atms(3))
-    allocate (self%fc(1),source=fcdefault)
     allocate (self%ref(1))
     self%atms(1) = a
     self%atms(2) = b
@@ -781,6 +925,13 @@ contains  !>--- Module routines start here
       d2 = 360.0_wp-d2
     end if
     self%ref(1) = d2/deg !reference in rad
+    if (present(tol).and.tol > 0.0_wp) then
+      self%subtype = pflatharm
+      allocate (self%fc(2),source=fcdefault)
+      self%fc(2) = tol/deg !> flat-bottom half-width, in rad
+    else
+      allocate (self%fc(1),source=fcdefault)
+    end if
     if (present(k)) then
       self%fc(1) = k
     end if
@@ -802,7 +953,7 @@ contains  !>--- Module routines start here
     real(wp) :: A(3),B(3),C(3)
     real(wp) :: r1(3),r2(3)
     real(wp) :: angle,k,ref,p,d,l1,l2
-    real(wp) :: dinv,dum,x,T,beta
+    real(wp) :: dinv,dum,x,tol,xx
     real(wp) :: dadA(3),dadB(3),dadC(3)
 
     energy = 0.0_wp
@@ -828,9 +979,19 @@ contains  !>--- Module routines start here
     case (pharmonic) !> harmonic potential
       energy = 0.5_wp*k*(x)**2
       dum = k*(x)
-    case (plogfermi) !> logfermi potential
-      energy = kb*T*log(1.0_wp+exp(beta*x))
-      dum = (kb*T*beta*exp(beta*x))/(exp(beta*x)+1.0_wp)
+    case (pflatharm) !> flat-bottom harmonic potential: no restoring force
+                      !> within +/-tol of ref (ordinary bending vibration is
+                      !> left alone), harmonic growth (measured from the tol
+                      !> boundary, not from ref itself) beyond it
+      tol = constr%fc(2)
+      if (abs(x) <= tol) then
+        energy = 0.0_wp
+        dum = 0.0_wp
+      else
+        xx = abs(x)-tol
+        energy = 0.5_wp*k*xx**2
+        dum = k*xx*sign(1.0_wp,x)
+      end if
     end select
 
     grd(1,iat) = dum*dadA(1)
@@ -972,7 +1133,7 @@ contains  !>--- Module routines start here
     real(wp) :: N1(3),N2(3),Nzero(3)
     real(wp) :: rab(3),rcb(3),rdc(3),na,nb,nc
     real(wp) :: dangle,k,ref,p,l1,l2
-    real(wp) :: dinv,dum,x,T,beta
+    real(wp) :: dinv,dum,x
     real(wp) :: dadN1(3),dadN2(3),dad0(3)
     real(wp) :: sig,dDdr(3)
     real(wp) :: dDdA(3),dDdB(3),dDdC(3),dDdD(3)
@@ -1011,14 +1172,8 @@ contains  !>--- Module routines start here
     x = dangle-ref
     if (x < -180.0_wp/deg) x = x+360.0_wp/deg
     if (x > 180.0_wp/deg) x = x-360.0_wp/deg
-    select case (constr%subtype)
-    case (pharmonic) !> harmonic potential
-      energy = 0.5_wp*k*(x)**2
-      dum = k*(x)
-    case (plogfermi) !> logfermi potential
-      energy = kb*T*log(1.0_wp+exp(beta*x))
-      dum = (kb*T*beta*exp(beta*x))/(exp(beta*x)+1.0_wp)
-    end select
+    energy = 0.5_wp*k*(x)**2
+    dum = k*(x)
 
     call dtorsdr(A,B,C,D,dadN1,dadN2,sig,dDdA,dDdB,dDdC,dDdD)
     grd(1:3,iat) = dum*dDdA(1:3)

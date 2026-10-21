@@ -253,6 +253,24 @@ contains   !> MODULE PROCEDURES START HERE
 
       case ('nci_metal')
         env%crestver = crest_nci_metal
+!>--- THIS is the dispatch point actually used by `runtype = "nci_metal"`
+!>    in a toml file (i.e. every nci_metal invocation this project uses:
+!>    `crest nci_metal.toml`) -- confparse.f90's CLI `-nci_metal` case
+!>    is a SEPARATE, independent dispatch table, only exercised if
+!>    "-nci_metal" is literally typed on the command line, which nothing
+!>    here does. Both are kept in sync with the same bundle so CLI and
+!>    toml invocation behave identically; see confparse.f90's case for
+!>    the full rationale of each setting below.
+        env%NCI = .true.
+        env%runver = 4
+        env%autozsort = .false.
+        env%checktopo = .false.
+!>--- iinversion deliberately left at its normal CREST default (0, auto):
+!>    metal-centered enantiomers (e.g. a Bailar-twist Delta/Lambda tris-
+!>    chelate) are accepted to merge via CREGEN's usual iRMSD-based
+!>    mirror-image check, same as any other runtype. Not worth special-
+!>    casing -- Delta/Lambda survival isn't something users need distinct
+!>    entries for by default.
 
       case ('protonate')
         env%properties = p_protonate
@@ -329,6 +347,18 @@ contains   !> MODULE PROCEDURES START HERE
       env%multilevelopt = val
     case ('refine_presort')
       env%refine_presort = val
+    case ('distinguish_enantiomers')
+      !> global nci_metal opt-in; resolved into env%iinversion at the
+      !> start of crest_search_newnci_metal, not here -- see classes.f90
+      env%distinguish_enantiomers = val
+    case ('full_search')
+      !> global nci_metal opt-in: run the GC step after each MTD
+      !> iteration, same as iMTD-GC's own search -- see classes.f90
+      env%full_search = val
+    case ('deep_sampling')
+      !> global nci_metal opt-in: raw sampling budget only, no GC --
+      !> see classes.f90
+      env%deep_sampling = val
 
     case ('omp_nested')
       env%omp_allow_nested = val

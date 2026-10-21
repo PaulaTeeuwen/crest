@@ -647,6 +647,43 @@ module crest_data
     logical :: quick                 !> quick-run option (mainly for testing)
     logical :: readbias = .false.    !> read MTD parameters from file
     logical :: reftopo = .true.      !> use a reference topology from the given input structure
+    !> nci_metal opt-in: keep metal-centered enantiomers (e.g. a Bailar-
+    !> twist Delta/Lambda tris-chelate) as distinct ensemble entries
+    !> instead of CREST's normal default (merge mirror images via
+    !> iRMSD). Off by default -- most users want the normal merging
+    !> behavior; this is for the minority who specifically want to see
+    !> both. Resolved into env%iinversion=2 once, early in
+    !> crest_search_newnci_metal, deliberately AFTER all TOML parsing
+    !> has finished so it is immune to key ordering in the input file.
+    logical :: distinguish_enantiomers = .false.
+    !> nci_metal opt-in: run the genetic-crossing (GC) step after each
+    !> MTD iteration, same as iMTD-GC's own crest_newcross3/confg_chk3/
+    !> elowcheck block (see crest_search_imtdgc, search_conformers.f90).
+    !> Off by default: nci_metal's own driver (search_newnci_metal.f90)
+    !> has never actually called this (confparse.f90's -nci_metal
+    !> handler sets env%performCross=.true. intending GC to run, but the
+    !> custom mainloop there never checked it -- confirmed empirically on
+    !> Vitamin B12, where nci_metal (restrained, 24 conf) badly
+    !> undersampled relative to plain imtd-gc (748 conf, ~8 kcal/mol
+    !> lower): B12's real flexibility is in its side chains/nucleotide
+    !> loop, far from the metal, which only GC's cross-conformer
+    !> recombination reaches -- MTD-length scaling by metal CN/ligand
+    !> flexibility alone doesn't). Kept opt-in rather than flipping the
+    !> default: every nci_metal test run so far this round was validated
+    !> without it, and turning it on unconditionally would silently
+    !> change all of their results.
+    logical :: full_search = .false.
+    !> nci_metal opt-in: a SEPARATE lever from full_search above, tested
+    !> independently to isolate which one actually explains the B12 gap
+    !> -- raw sampling budget, no GC at all. Directly multiplies env
+    !> %mdtime (per-MTD length, on top of the existing CN/flexibility
+    !> scaling) and raises env%Maxrestart (the inner mtdloop's max
+    !> iteration count, default 5), instead of trying to fix flexi()'s
+    !> B12 flexibility estimate (0.398 -- clearly an undercount of its
+    !> real side-chain/nucleotide-loop flexibility, but why is a separate,
+    !> deeper question not addressed by this flag). Off by default for
+    !> the same regression-safety reason as full_search.
+    logical :: deep_sampling = .false.
     logical :: relax = .false.       !> was the --relax function used for protonation site search?
     logical :: restartopt            !> restart in the second step of the multilevel opt (V2) ?
     logical :: reweight = .false.    !> reweight structures on the fly after optimizations (i.e. do SPs)?

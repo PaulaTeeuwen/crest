@@ -182,7 +182,7 @@ subroutine crest_search_imtdgc(env,tim)
 !>--- Reoptimization of trajectories
       call tim%start(3,'Geometry optimization')
       call optlev_to_multilev(env%optlev,multilevel)
-      call crest_multilevel_oloop(env,ensnam,multilevel,i)
+      call crest_multilevel_oloop(env,ensnam,multilevel,i,i)
       call tim%stop(3)
       if (env%iostatus_meta .ne. 0) return
 
@@ -425,11 +425,17 @@ subroutine crest_multilevel_wrap(env,ensnam,level)
     k = max(1,k)
     multilevel(k) = .true.
   end select
-  call crest_multilevel_oloop(env,ensnam,multilevel,0)
+  call crest_multilevel_oloop(env,ensnam,multilevel,0,0)
 end subroutine crest_multilevel_wrap
 
 !========================================================================================!
-subroutine crest_multilevel_oloop(env,ensnam,multilevel_in,mtd_iter_in)
+subroutine crest_multilevel_oloop(env,ensnam,multilevel_in,mtd_iter_in,dbg_iter)
+!> dbg_iter: the REAL mtdloop iteration index, for debug-dump filenames
+!> only (mtd_iter_in is reused for restart-checkpoint logic elsewhere
+!> and is always 0 for the seeded nci_metal path, which would make
+!> debug dumps from different mtdloop iterations silently overwrite
+!> each other under identical filenames -- pass mtd_iter_in again here
+!> at every call site that doesn't care about this distinction).
 !*******************************************************
 !* multilevel optimization loop.
 !* construct consecutive optimizations starting with
@@ -450,6 +456,8 @@ subroutine crest_multilevel_oloop(env,ensnam,multilevel_in,mtd_iter_in)
   character(len=*),intent(in) :: ensnam
   logical,intent(in) :: multilevel_in(6)
   integer,intent(in) :: mtd_iter_in
+  integer,intent(in) :: dbg_iter
+  integer :: dbg_iter_eff
   integer :: nat,nall
   logical :: dump,pr
   character(len=128) :: inpnam,outnam
@@ -470,6 +478,8 @@ subroutine crest_multilevel_oloop(env,ensnam,multilevel_in,mtd_iter_in)
       character(len=*),intent(in),optional :: output
     end subroutine crest_refine
   end interface
+
+  dbg_iter_eff = dbg_iter
 
 !>--- save backup thresholds
   ewinbackup = env%ewin
@@ -530,15 +540,36 @@ subroutine crest_multilevel_oloop(env,ensnam,multilevel_in,mtd_iter_in)
         env%iostatus_meta = status_failed
         return
       end if
+!>DEBUG_DUMP_A: right after this stage's own optimization, before refine/CREGEN
+      block
+        character(len=256) :: dbgcmd,dbgtag
+        write (dbgtag,'(a,i0,a,a,a,i0)') 'DEBUG_stage',i,'_',trim(ensnam),'_A_after_opt_mtditer',dbg_iter_eff
+        dbgcmd = 'cp '//trim(inpnam)//' '//trim(dbgtag)//'.xyz'
+        call execute_command_line(trim(dbgcmd))
+      end block
 
       write (stdout,*)
       !==========================================================!
       !>-- dedicated ensemble refinement step (overwrites inpnam)
       call crest_refine(env,trim(inpnam))
       !==========================================================!
+!>DEBUG_DUMP_B: right after crest_refine, before CREGEN sort_and_check
+      block
+        character(len=256) :: dbgcmd,dbgtag
+        write (dbgtag,'(a,i0,a,a,a,i0)') 'DEBUG_stage',i,'_',trim(ensnam),'_B_after_refine_mtditer',dbg_iter_eff
+        dbgcmd = 'cp '//trim(inpnam)//' '//trim(dbgtag)//'.xyz'
+        call execute_command_line(trim(dbgcmd))
+      end block
 
       !>--- CREGEN sorting
       call sort_and_check(env,trim(inpnam))
+!>DEBUG_DUMP_C: right after this stage's own CREGEN dedup
+      block
+        character(len=256) :: dbgcmd,dbgtag
+        write (dbgtag,'(a,i0,a,a,a,i0)') 'DEBUG_stage',i,'_',trim(ensnam),'_C_after_cregen_mtditer',dbg_iter_eff
+        dbgcmd = 'cp '//trim(inpnam)//' '//trim(dbgtag)//'.xyz'
+        call execute_command_line(trim(dbgcmd))
+      end block
       call checkname_xyz(crefile,inpnam,outnam)
 ! ── restart checkpoint: intermediate ensemble after this opt. level ──
       if (mtd_iter_in > 0) then
@@ -754,7 +785,7 @@ subroutine crest_newcross3(env)
     else
       multilevel(4) = .true.
     end if
-    call crest_multilevel_oloop(env,'confcross.xyz',multilevel,0)
+    call crest_multilevel_oloop(env,'confcross.xyz',multilevel,0,0)
     if (env%iostatus_meta .ne. 0) return
 
 !>-- append optimized crossed structures and original to a single file

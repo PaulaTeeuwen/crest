@@ -506,6 +506,28 @@ contains  !> MODULE PROCEDURES START HERE
   end function inv3x3
 
 !========================================================================================!
+  elemental function is_metal_atom(iat) result(yesno)
+    !*****************************************************************
+    !* Self-contained metal check (transition metals + s-block ionic
+    !* metals), duplicating bondconstraint.f90's isTMetal/isSBlockMetal
+    !* atomic-number ranges rather than depending on that module: this
+    !* sorting/ subdirectory builds before bondconstraint.f90 does, so
+    !* a direct `use` here would be a build-order/layering violation.
+    !* Used only to gate the equal-mass axis fallback (see min_rmsd)
+    !* onto the metal-containing systems it's actually meant for.
+    !*****************************************************************
+    implicit none
+    integer,intent(in) :: iat
+    logical :: yesno
+    yesno = .false.
+    if (iat >= 21.and.iat <= 30) yesno = .true. !> 3d transition metals
+    if (iat >= 39.and.iat <= 48) yesno = .true. !> 4d transition metals
+    if (iat >= 57.and.iat <= 80) yesno = .true. !> 5d transition metals + lanthanides
+    if (any(iat == [3,11,19,37,55,87])) yesno = .true. !> Li,Na,K,Rb,Cs,Fr
+    if (any(iat == [4,12,20,38,56,88])) yesno = .true. !> Be,Mg,Ca,Sr,Ba,Ra
+  end function is_metal_atom
+
+!========================================================================================!
   subroutine rmsd_align(ref,mol,mask)
     !********************************************************
     !* Routine to align the structure "mol"
@@ -742,32 +764,94 @@ contains  !> MODULE PROCEDURES START HERE
 !> ROTATIONAL AXIS ALIGNMENT AND LSAP CHECKS - START
 !> ----------------------------------------------------
 
-      !> initialize to huge
-      tmprmsd_sym(:) = inf
-      !> initial alignment of mol
-      call axis(mol%nat,mol%at,mol%xyz,rotconst)
-      call min_rmsd_rotcheck_unique(rotconst,uniquenesscase)
+!> Two pre-alignment trials, keeping whichever reaches the lower LSAP
+!> cost: trial 1 is the original mass-weighted axis(), trial 2 repeats
+!> the exact same search using axis_4_equal_mass instead. Motivation:
+!> axis()'s inertia tensor is mass-weighted, so a few heavy atoms among
+!> many light ones (e.g. a metal center) can bias the principal axes
+!> away from a real point-group operation, causing min_rmsd to miss it
+!> (see axis_module.f90's axis_0_equal_mass docstring, and its Fe4Cage
+!> motivating example). The 32-way grid search itself
+!> (min_rmsd_rotcheck_permute) is untouched; this only gives it a
+!> second candidate pre-alignment to search from.
+      block
+        real(wp),allocatable :: xyz_pristine(:,:),xyz_best(:,:)
+        integer,allocatable :: order_bkup_best(:,:)
+        real(wp) :: tmprmsd_sym_best(32)
+        real(wp) :: best_cost,trial_cost
+        integer :: uniquenesscase_best,trial,ntrials
 
-      !> Running the checks and check of uniqueness of rotational axes
-      call min_rmsd_rotcheck_permute(ref,mol,cptr,tmprmsd_sym,1,uniquenesscase)
-      if (debug) then
-        write (*,*) 'Total LSAP cost:',minval(tmprmsd_sym(1:16))
-        call mol%append(dumpunit)
-      end if
+        !> the equal-mass fallback exists specifically to fix mass-biased
+        !> alignment for metal-containing systems (see docstring above) --
+        !> gate it on a metal actually being present, rather than running
+        !> the full second 16-way grid search unconditionally for every
+        !> comparison. Ordinary (non-metal) molecules get exactly the
+        !> original single-trial cost; only metal-containing ones (the
+        !> cases this fix targets, e.g. nci_metal's own structures) pay
+        !> for the extra robustness.
+        ntrials = merge(2,1,any(is_metal_atom(mol%at(1:mol%nat))))
 
-      !> mirror z and re-run the same checks (i.e. the false rotamer inversion)
-      if (cptr%stereocheck) then
-        mol%xyz(3,:) = -mol%xyz(3,:)  !> mirror z
-        call axis(mol%nat,mol%at,mol%xyz) !> align
+        allocate (xyz_pristine(3,mol%nat),source=mol%xyz)
+        best_cost = inf
 
-        !> Running the checks
-        call min_rmsd_rotcheck_permute(ref,mol,cptr,tmprmsd_sym,2,uniquenesscase)
-        if (debug) then
-          write (*,*) 'Total LSAP cost (inverted):',minval(tmprmsd_sym(17:32))
-          call mol%append(dumpunit)
-        end if
-        mol%xyz(3,:) = -mol%xyz(3,:)  !> restore z
-      end if
+        do trial = 1,ntrials
+          if (trial == 2) mol%xyz = xyz_pristine  !> restore pre-alignment coords
+
+          !> initialize to huge
+          tmprmsd_sym(:) = inf
+          !> initial alignment of mol
+          if (trial == 1) then
+            call axis(mol%nat,mol%at,mol%xyz,rotconst)
+          else
+            call axis_4_equal_mass(mol%nat,mol%at,mol%xyz,rotconst)
+          end if
+          call min_rmsd_rotcheck_unique(rotconst,uniquenesscase)
+
+          !> Running the checks and check of uniqueness of rotational axes
+          call min_rmsd_rotcheck_permute(ref,mol,cptr,tmprmsd_sym,1,uniquenesscase)
+          if (debug) then
+            write (*,*) 'Total LSAP cost:',minval(tmprmsd_sym(1:16))
+            call mol%append(dumpunit)
+          end if
+
+          !> mirror z and re-run the same checks (i.e. the false rotamer inversion)
+          if (cptr%stereocheck) then
+            mol%xyz(3,:) = -mol%xyz(3,:)  !> mirror z
+            if (trial == 1) then
+              call axis(mol%nat,mol%at,mol%xyz) !> align
+            else
+              call axis_4_equal_mass(mol%nat,mol%at,mol%xyz) !> align
+            end if
+
+            !> Running the checks
+            call min_rmsd_rotcheck_permute(ref,mol,cptr,tmprmsd_sym,2,uniquenesscase)
+            if (debug) then
+              write (*,*) 'Total LSAP cost (inverted):',minval(tmprmsd_sym(17:32))
+              call mol%append(dumpunit)
+            end if
+            mol%xyz(3,:) = -mol%xyz(3,:)  !> restore z
+          end if
+
+          trial_cost = minval(tmprmsd_sym(1:32))
+          if (trial_cost < best_cost) then
+            best_cost = trial_cost
+            if (.not.allocated(xyz_best)) allocate (xyz_best(3,mol%nat))
+            if (.not.allocated(order_bkup_best)) allocate (order_bkup_best(mol%nat,32))
+            xyz_best = mol%xyz
+            order_bkup_best = cptr%order_bkup(:,1:32)
+            tmprmsd_sym_best = tmprmsd_sym
+            uniquenesscase_best = uniquenesscase
+          end if
+        end do
+
+        !> restore the winning trial's state -- everything below this block
+        !> (unchanged from before this fix) then proceeds exactly as it
+        !> always did, on whichever trial actually won.
+        mol%xyz = xyz_best
+        cptr%order_bkup(:,1:32) = order_bkup_best
+        tmprmsd_sym = tmprmsd_sym_best
+        uniquenesscase = uniquenesscase_best
+      end block
 
 !>--- select the best match among the ones after symmetry operations and use its ordering
       ii = minloc(tmprmsd_sym(1:32),1)

@@ -27,4 +27,5 @@ srcs += files(
   'parse_toml.F90',
   'parse_inputfile.F90',
   'parse_keyvalue.f90',
+  'nci_metal_settings.f90',
 )

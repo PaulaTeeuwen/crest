@@ -1357,19 +1357,26 @@ contains !> MODULE PROCEDURES START HERE
     character(len=64) :: spec
     character(len=20) :: numstr
     character(len=:),allocatable :: label
-    logical :: got_atom,got_label,got_restrain,got_r1,got_theta0
-    logical :: restrainval,autoval,forceval
+    logical :: got_atom,got_label,got_restrain,got_r1,got_theta0,got_seed,got_piatoms
+    logical :: restrainval,autoval,forceval,seedval
     real(wp) :: anglefcval,r1val,theta0val
     integer :: i,k
+    integer,allocatable :: piatomsval(:)
     if (blk%header .ne. 'calculation.nci_metal') return
     got_atom = .false.
     got_label = .false.
     got_restrain = .false.
     got_r1 = .false.
     got_theta0 = .false.
+    got_seed = .false.
+    got_piatoms = .false.
     restrainval = .true.
     autoval = .false.
     forceval = .false.
+!>--- seed defaults to false even within an explicit block -- see the
+!>    comment at nci_metal_settings.f90's add_spec for why this is NOT
+!>    symmetric with restrainval's true default above.
+    seedval = .false.
     anglefcval = -1.0_wp !> <=0 signals "not set, use constraints.f90's own default (fcdefault)"
     r1val = -1.0_wp    !> <=0 signals "not set, use normal UFF4MOF resolution"
     theta0val = -1.0_wp !> <=0 signals "not set, use normal UFF4MOF resolution"
@@ -1454,18 +1461,91 @@ contains !> MODULE PROCEDURES START HERE
           istat = istat+1
           write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
         end if
+!>--- "geometry=" is pure sugar for theta0=: a name instead of a number,
+!>    for whichever shapes the restraint code can actually represent
+!>    today (all of them reduce to ONE angle class apart from theta0's
+!>    own antipodal-pair handling, which already works for any of
+!>    these -- see search_newnci_metal.f90). Resolves to the exact same
+!>    theta0val/got_theta0 used by a direct theta0= -- no separate code
+!>    path anywhere else. Deliberately does NOT cover
+!>    "trigonal_bipyramidal": that genuinely needs a 3rd angle class
+!>    (90/120/180 deg) the restraint code cannot build yet, so it is
+!>    refused here with an explicit message instead of silently
+!>    building a wrong (2-class) approximation of it.
+      case ('geometry','shape')
+        if (blk%kv_list(i)%id == valuetypes%string) then
+          select case (trim(blk%kv_list(i)%value_c))
+          case ('tetrahedral')
+            theta0val = 109.47_wp
+            got_theta0 = .true.
+          case ('trigonal_planar')
+            theta0val = 120.0_wp
+            got_theta0 = .true.
+          case ('square_planar','square_pyramidal','octahedral')
+            theta0val = 90.0_wp
+            got_theta0 = .true.
+          case ('trigonal_bipyramidal')
+            istat = istat+1
+            write (stdout,'(1x,a)') '**ERROR** [[calculation.nci_metal]]-block: geometry='// &
+            & '"trigonal_bipyramidal" needs a 3rd angle class (90/120/180 deg) the restraint '// &
+            & 'code cannot build yet -- give r1/theta0 directly if you want an (incomplete, '// &
+            & '2-class) approximation, or leave this metal unrestrained.'
+          case default
+            istat = istat+1
+            write (stdout,'(1x,a)') '**ERROR** [[calculation.nci_metal]]-block: unknown geometry="'// &
+            & trim(blk%kv_list(i)%value_c)//'" -- valid: tetrahedral, trigonal_planar, '// &
+            & 'square_planar, square_pyramidal, octahedral'
+          end select
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('seed')
+        if (blk%kv_list(i)%id == valuetypes%bool) then
+          seedval = blk%kv_list(i)%value_b
+          got_seed = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
+      case ('pi_atoms')
+!>--- pi-coordination (eta-bonded) support: a flat, user-given list of
+!>    atom indices forming one or more coordinating ring/diene faces
+!>    (donor detection never finds these itself -- hardcoded to N/O/S/
+!>    P/F/Cl/Br/I only, see search_newnci_metal.f90). A single flat
+!>    list is deliberate even for a metal with MULTIPLE separate
+!>    pi-ligands (e.g. nickelocene's two independent Cp rings): list
+!>    every involved carbon together, and crest_search_newnci_metal
+!>    splits it into separate rings by connectivity (two Cp rings
+!>    aren't bonded to each other) rather than requiring the user to
+!>    pre-group them -- simpler for the user than either a nested-array
+!>    syntax or repeating the whole block per ring.
+        if (blk%kv_list(i)%id == valuetypes%int_array) then
+          if (allocated(piatomsval)) deallocate (piatomsval)
+          allocate (piatomsval(blk%kv_list(i)%na))
+          piatomsval(1:blk%kv_list(i)%na) = blk%kv_list(i)%value_ia(1:blk%kv_list(i)%na)
+          got_piatoms = .true.
+        else
+          istat = istat+1
+          write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
+        end if
       case default
         istat = istat+1
         write (stdout,fmturk) '[[calculation.nci_metal]]-block',blk%kv_list(i)%key
       end select
     end do
-    if (got_atom.and.(got_label.or.autoval.or.got_restrain.or.got_r1.or.got_theta0)) then
+    if (got_atom.and.(got_label.or.autoval.or.got_restrain.or.got_r1.or.got_theta0.or.got_seed.or.got_piatoms)) then
       if (got_label.and.autoval) then
         write (stdout,'(1x,a)') &
         & '**WARNING** [[calculation.nci_metal]] entry has both "uff4mof" and "auto=true"; '// &
         & 'using the explicit "uff4mof" label'
       end if
-      call env%nci_metal%add_spec(spec,label,restrainval,autoval,forceval,anglefcval,r1val,theta0val)
+      if (got_piatoms) then
+        call env%nci_metal%add_spec(spec,label,restrainval,autoval,forceval,anglefcval,r1val,theta0val,seedval, &
+        & pi_atoms_in=piatomsval)
+      else
+        call env%nci_metal%add_spec(spec,label,restrainval,autoval,forceval,anglefcval,r1val,theta0val,seedval)
+      end if
     else
       write (stdout,'(1x,a)') &
       & '**WARNING** [[calculation.nci_metal]] entry needs "atom" and one of "uff4mof", "auto=true", '// &
